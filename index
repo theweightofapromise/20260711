@@ -516,17 +516,35 @@ label{font-size:12px;color:var(--text-dim);display:block;margin-top:12px;}
   }
 
   // ---- SETTLE TAB ----
+  async function getManagedGoals(){
+    await loadUsers();
+    const list = [];
+    for (const u of state.users){
+      if (u.id === state.me.id) continue;
+      const goals = await loadGoalsFor(u.id);
+      goals.filter(g => g.managerId === state.me.id).forEach(g => {
+        list.push({ ownerId: u.id, ownerName: u.name, goal: g });
+      });
+    }
+    return list;
+  }
+
   async function renderSettle(content){
     await loadUsers();
     await loadMyGoals();
-    if (!state.goals.length){
+    state.allGoalsByUser = {}; // refresh so managed-goal list is current
+    const managed = await getManagedGoals();
+    if (!state.goals.length && !managed.length){
       content.innerHTML = `<div class="empty"><div class="glyph">🧾</div><p>정산할 목표가 없어요.</p></div>`;
       return;
     }
-    const weekGoals = state.goals.filter(g => (g.periodType||'week') === 'week');
-    const monthGoals = state.goals.filter(g => g.periodType === 'month');
+    const myWeek = state.goals.filter(g => (g.periodType||'week') === 'week');
+    const myMonth = state.goals.filter(g => g.periodType === 'month');
+    const mgWeek = managed.filter(m => (m.goal.periodType||'week') === 'week');
+    const mgMonth = managed.filter(m => m.goal.periodType === 'month');
+
     let html = '';
-    if (weekGoals.length){
+    if (myWeek.length || mgWeek.length){
       html += `
         <div class="section-title">주간 정산</div>
         <div class="week-switch">
@@ -534,9 +552,16 @@ label{font-size:12px;color:var(--text-dim);display:block;margin-top:12px;}
           <div class="week-label">${weekRangeLabel(state.weekOffset)}</div>
           <button onclick="app.shiftWeek(1)" ${state.weekOffset>=0?'disabled style="opacity:.3"':''}>다음주 ›</button>
         </div>`;
-      for (const g of weekGoals) html += await goalReceiptCard(g, state.weekOffset);
+      if (myWeek.length){
+        html += `<div class="card-sub" style="margin:10px 0 4px;">내 목표</div>`;
+        for (const g of myWeek) html += await goalReceiptCard(g, state.weekOffset, state.me.id, null);
+      }
+      if (mgWeek.length){
+        html += `<div class="card-sub" style="margin:14px 0 4px;">내가 관리 중인 목표</div>`;
+        for (const m of mgWeek) html += await goalReceiptCard(m.goal, state.weekOffset, m.ownerId, m.ownerName);
+      }
     }
-    if (monthGoals.length){
+    if (myMonth.length || mgMonth.length){
       html += `
         <div class="section-title">월간 정산</div>
         <div class="week-switch">
@@ -544,33 +569,45 @@ label{font-size:12px;color:var(--text-dim);display:block;margin-top:12px;}
           <div class="week-label">${monthRangeLabel(state.monthOffset)}</div>
           <button onclick="app.shiftMonth(1)" ${state.monthOffset>=0?'disabled style="opacity:.3"':''}>다음달 ›</button>
         </div>`;
-      for (const g of monthGoals) html += await goalReceiptCard(g, state.monthOffset);
+      if (myMonth.length){
+        html += `<div class="card-sub" style="margin:10px 0 4px;">내 목표</div>`;
+        for (const g of myMonth) html += await goalReceiptCard(g, state.monthOffset, state.me.id, null);
+      }
+      if (mgMonth.length){
+        html += `<div class="card-sub" style="margin:14px 0 4px;">내가 관리 중인 목표</div>`;
+        for (const m of mgMonth) html += await goalReceiptCard(m.goal, state.monthOffset, m.ownerId, m.ownerName);
+      }
     }
     content.innerHTML = html;
   }
 
-  async function goalReceiptCard(g, offset){
+  async function goalReceiptCard(g, offset, ownerId, ownerName){
     const pk = periodKeyFor(g, offset);
-    const wd = await loadWeekData(state.me.id, pk);
+    const wd = await loadWeekData(ownerId, pk);
     const gd = wd[g.id] || { entries: [], depositPaid:false, refundSettled:false };
     const approved = gd.entries.filter(e=>e.status==='approved').length;
     const ratio = Math.min(approved / g.targetCount, 1);
     const refund = Math.round(ratio * g.amount / 1000) * 1000;
     const managerName = (state.users.find(u=>u.id===g.managerId)||{}).name || '미지정';
+    const isMine = ownerId === state.me.id;
+    const whoLine = isMine
+      ? `<span style="color:var(--gold);">내 목표</span> · 관리자 ${escapeHtml(managerName)}`
+      : `<span style="color:var(--gold);">${escapeHtml(ownerName)}님의 목표</span> · 내가 관리자`;
     return `
         <div class="receipt">
           <h3>${escapeHtml(g.name)}</h3>
-          <div class="rsub">${periodLabel(g, offset)} · 관리자 ${escapeHtml(managerName)}</div>
+          <div class="rsub">${whoLine}</div>
+          <div class="rsub">${periodLabel(g, offset)}</div>
           <div class="rline"><span>목표</span><span class="amt">${approved} / ${g.targetCount} 회</span></div>
           <div class="rline"><span>보증금</span><span class="amt">${fmtWon(g.amount)}</span></div>
-          <div class="rline total"><span>돌려받을 금액</span><span class="amt">${fmtWon(refund)}</span></div>
+          <div class="rline total"><span>${isMine ? '돌려받을 금액' : escapeHtml(ownerName) + '에게 돌려줄 금액'}</span><span class="amt">${fmtWon(refund)}</span></div>
           <div class="rline" style="border-bottom:none;padding-top:10px;">
-            <span>입금(내가 보냄) <span class="rtag ${gd.depositPaid?'paid':'unpaid'}">${gd.depositPaid?'완료':'대기'}</span></span>
-            <button class="btn btn-ghost btn-sm" onclick="app.toggleDeposit('${g.id}', ${offset}, '${g.periodType||'week'}')">${gd.depositPaid?'취소':'표시'}</button>
+            <span>${isMine ? '입금(내가 보냄)' : '입금(상대가 보냄)'} <span class="rtag ${gd.depositPaid?'paid':'unpaid'}">${gd.depositPaid?'완료':'대기'}</span></span>
+            <button class="btn btn-ghost btn-sm" onclick="app.toggleDeposit('${ownerId}','${g.id}', ${offset}, '${g.periodType||'week'}')">${gd.depositPaid?'취소':'표시'}</button>
           </div>
           <div class="rline" style="border-bottom:none;">
-            <span>환급(내가 받음) <span class="rtag ${gd.refundSettled?'paid':'unpaid'}">${gd.refundSettled?'완료':'대기'}</span></span>
-            <button class="btn btn-ghost btn-sm" onclick="app.toggleRefund('${g.id}', ${offset}, '${g.periodType||'week'}')">${gd.refundSettled?'취소':'표시'}</button>
+            <span>${isMine ? '환급(내가 받음)' : '환급(내가 보냄)'} <span class="rtag ${gd.refundSettled?'paid':'unpaid'}">${gd.refundSettled?'완료':'대기'}</span></span>
+            <button class="btn btn-ghost btn-sm" onclick="app.toggleRefund('${ownerId}','${g.id}', ${offset}, '${g.periodType||'week'}')">${gd.refundSettled?'취소':'표시'}</button>
           </div>
         </div>`;
   }
@@ -676,20 +713,20 @@ label{font-size:12px;color:var(--text-dim);display:block;margin-top:12px;}
       state.monthOffset = next;
       renderTab();
     },
-    async toggleDeposit(goalId, offset, periodType){
+    async toggleDeposit(ownerId, goalId, offset, periodType){
       const pk = periodKeyForType(periodType, offset);
-      const wd = await loadWeekData(state.me.id, pk);
+      const wd = await loadWeekData(ownerId, pk);
       if (!wd[goalId]) wd[goalId] = { entries: [], depositPaid:false, refundSettled:false };
       wd[goalId].depositPaid = !wd[goalId].depositPaid;
-      await saveWeekData(state.me.id, pk, wd);
+      await saveWeekData(ownerId, pk, wd);
       renderTab();
     },
-    async toggleRefund(goalId, offset, periodType){
+    async toggleRefund(ownerId, goalId, offset, periodType){
       const pk = periodKeyForType(periodType, offset);
-      const wd = await loadWeekData(state.me.id, pk);
+      const wd = await loadWeekData(ownerId, pk);
       if (!wd[goalId]) wd[goalId] = { entries: [], depositPaid:false, refundSettled:false };
       wd[goalId].refundSettled = !wd[goalId].refundSettled;
-      await saveWeekData(state.me.id, pk, wd);
+      await saveWeekData(ownerId, pk, wd);
       renderTab();
     }
   };
